@@ -4,7 +4,7 @@
 
 
 pip install -r requirements.txt
-python .\run.py example.com
+python .\quick-dd.py example.com
 
 
 核心流程
@@ -15,7 +15,7 @@ python .\run.py example.com
 5) 查询IP段，方便进行全量端口扫描
 
 主要文件
-- `run.py`：主入口，组织流程并导出结果。  
+- `quick-dd.py`：主入口，组织流程并导出结果。  
 - `domain.py`：子域采集与并发探活实现。  
 - `subdomain_brute.py`：字典爆破与解析。  
 - `ct_lookup.py`：证书透明度（CT）数据补全。  
