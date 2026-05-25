@@ -23,22 +23,4 @@ python .\run.py example.com
 - `brute_dict/`：爆破字典文件目录。  
 - `requirements.txt`：依赖清单。  
 
-## 打包为 Windows 可执行文件
-
-仓库包含 `build_exe.ps1`，用于在 Windows 上通过 PyInstaller 生成单文件 exe（quick-dd）。
-
-用法（在项目根目录执行）：
-
-```powershell
-# 运行 PowerShell 脚本（会创建虚拟环境并安装 PyInstaller）
-.\build_exe.ps1
-```
-
-手动命令示例：
-
-```powershell
-pyinstaller --onefile --name quick-dd --add-data "brute_dict;brute_dict" run.py
-```
-
-说明：脚本会把 `brute_dict/` 一并包含，生成的可执行文件位于 `dist\quick-dd.exe`。
 
