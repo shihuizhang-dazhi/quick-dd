@@ -89,7 +89,7 @@ python quick-dd.py example.com --fofa --port-scan
 | `cert="example.com"` | 按证书 |
 | `title="后台" && domain="xxx"` | 组合查询 |
 
-> 需要 [FOFA API Key](https://fofa.info)（免费注册）
+> 需要 [FOFA API Key](https://fofa.info)
 
 ## 技术架构
 
