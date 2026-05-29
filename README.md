@@ -34,6 +34,39 @@ fofa.py                # FOFA API
 port_scan.py           # TCP 端口扫描（支持自定义端口范围）
 brute_dict/            # 爆破字典目录
 
+## 技术架构
+
+```
+输入域名
+  │
+  ├── ip138 API ───────┐
+  ├── 字典爆破 (10万) ──┤
+  ├── CT 证书日志 ──────┼──→ 合并去重 → 并发探活(80/443/8080) → 端口扫描
+  └── FOFA 网空引擎 ────┘         │
+                                  ├── Excel 报告
+                                  │    ├── assets：域名/IP/URL/状态码/标题
+                                  │    ├── fofa：FOFA 查询结果
+                                  │    ├── port_scan：开放端口
+                                  │    ├── ip_domains：IP-域名映射
+                                  │    └── asn_info：ASN/CIDR/网段
+                                  └── URLs.txt（供 nuclei 调用）
+```
+
+## 输出样例
+
+```
+  ▸ 子域采集 (ip138)    176 个子域名
+  ▸ 字典爆破            +40 新增 (216 总计)
+  ▸ CT 日志 (crt.sh)    +45 新增 (261 总计)
+  ▸ FOFA 资产查询       跳过 (未配置 API)
+  ────────────────────────────────────────
+  ▸ 待测主机            253 个
+  ▸ 并发探活            188 存活 / 253 总计
+  ▸ 端口扫描 (188)      168 主机开放 / 2674 端口
+  ▸ IP 段查询           AS15169 211.64.160.0/19 (5 段)
+
+  📂 输出  qdu.edu.cn_output/qdu.edu.cn_assets.xlsx
+           qdu.edu.cn_output/qdu.edu.cn_urls.txt
 ## 快速上手
 
 ```bash
@@ -91,38 +124,6 @@ python quick-dd.py example.com --fofa --port-scan
 
 > 需要 [FOFA API Key](https://fofa.info)
 
-## 技术架构
 
-```
-输入域名
-  │
-  ├── ip138 API ───────┐
-  ├── 字典爆破 (10万) ──┤
-  ├── CT 证书日志 ──────┼──→ 合并去重 → 并发探活(80/443/8080) → 端口扫描
-  └── FOFA 网空引擎 ────┘         │
-                                  ├── Excel 报告
-                                  │    ├── assets：域名/IP/URL/状态码/标题
-                                  │    ├── fofa：FOFA 查询结果
-                                  │    ├── port_scan：开放端口
-                                  │    ├── ip_domains：IP-域名映射
-                                  │    └── asn_info：ASN/CIDR/网段
-                                  └── URLs.txt（供 nuclei 调用）
-```
-
-## 输出样例
-
-```
-  ▸ 子域采集 (ip138)    176 个子域名
-  ▸ 字典爆破            +40 新增 (216 总计)
-  ▸ CT 日志 (crt.sh)    +45 新增 (261 总计)
-  ▸ FOFA 资产查询       跳过 (未配置 API)
-  ────────────────────────────────────────
-  ▸ 待测主机            253 个
-  ▸ 并发探活            188 存活 / 253 总计
-  ▸ 端口扫描 (188)      168 主机开放 / 2674 端口
-  ▸ IP 段查询           AS15169 211.64.160.0/19 (5 段)
-
-  📂 输出  qdu.edu.cn_output/qdu.edu.cn_assets.xlsx
-           qdu.edu.cn_output/qdu.edu.cn_urls.txt
 ```
 
