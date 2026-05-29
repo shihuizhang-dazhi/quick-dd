@@ -22,6 +22,18 @@
 - **高并发**：爆破 100 线程 / 探活 50 线程 / 端口扫描 20 线程
 - **输出丰富**：Excel（5 个 Sheet）+ URLs.txt（供 nuclei 等工具调用）
 
+## 项目结构
+
+```
+quick-dd.py            # 主入口（全流程）
+domain.py              # 子域采集 + 探活 + FOFA + 端口扫描
+subdomain_brute.py     # 字典爆破 + 80/443/8080 探活
+ct_lookup.py           # CT 证书日志查询
+real_ip_finder.py      # IP / CIDR / ASN 查询
+fofa.py                # FOFA API
+port_scan.py           # TCP 端口扫描（支持自定义端口范围）
+brute_dict/            # 爆破字典目录
+
 ## 快速上手
 
 ```bash
@@ -114,14 +126,3 @@ python quick-dd.py example.com --fofa --port-scan
            qdu.edu.cn_output/qdu.edu.cn_urls.txt
 ```
 
-## 项目结构
-
-```
-quick-dd.py            # 主入口（全流程）
-domain.py              # 子域采集 + 探活 + FOFA + 端口扫描
-subdomain_brute.py     # 字典爆破 + 80/443/8080 探活
-ct_lookup.py           # CT 证书日志查询
-real_ip_finder.py      # IP / CIDR / ASN 查询
-fofa.py                # FOFA API
-port_scan.py           # TCP 端口扫描（支持自定义端口范围）
-brute_dict/            # 爆破字典目录
