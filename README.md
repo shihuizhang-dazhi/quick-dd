@@ -126,7 +126,7 @@ python quick-dd-ai.py 山东大学 --only-domains --yes > domains.txt
 
 ### 输出示例
 
-![60f79a81b8f83f48b8d25bacc09de397](C:\Users\30669\xwechat_files\wxid_wrzptc47fiea22_ddb5\temp\RWTemp\2026-05\9e20f478899dc29eb19741386f9343c8\60f79a81b8f83f48b8d25bacc09de397.png)
+![Uploading 60f79a81b8f83f48b8d25bacc09de397.png…]()
 
 ---
 
