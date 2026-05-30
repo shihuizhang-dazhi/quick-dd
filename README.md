@@ -126,7 +126,8 @@ python quick-dd-ai.py 山东大学 --only-domains --yes > domains.txt
 
 ### 输出示例
 
-![Uploading 60f79a81b8f83f48b8d25bacc09de397.png…]()
+<img width="1743" height="1085" alt="60f79a81b8f83f48b8d25bacc09de397" src="https://github.com/user-attachments/assets/380ce1a9-9058-4028-aef2-859ace75f21c" />
+
 
 ---
 
