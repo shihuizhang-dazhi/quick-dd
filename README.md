@@ -16,7 +16,7 @@ real_ip_finder.py        # IP / CIDR / ASN / 反向DNS 查询
 fofa.py                  # FOFA API
 port_scan.py             # TCP 端口扫描
 brute_dict/              # 爆破字典
-dddd/                    # 工具目录（nuclei 等）
+dddd/                    # 工具目录（dddd、nuclei 等）
 ```
 ### 工作流程
 
