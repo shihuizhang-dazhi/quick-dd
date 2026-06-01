@@ -1,0 +1,24 @@
+POST /crm/web/sjb/toker/queryenterpriserecommendlistwithicpinfo HTTP/1.1
+Host: shangjibao.baidu.com
+Cookie: 
+Auth-Type: PAAS
+Sec-Ch-Ua-Mobile: ?0
+User-Info: uc_id=;uc_appid=585;acc_token=f3b4d93fdb522f5943d3bee3317fbd2d62846bd51bc18788ddf84b7c76650f78;acc_id=355543583;login_id=355543583:0;device_type=web980748903089438720;paas_appid=20;version=12;login_type=passport
+X-Requested-With: XMLHttpRequest
+User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36 Edg/148.0.0.0
+Accept: application/json, text/plain, */*
+Env: WEB
+Content-Type: application/json;charset=UTF-8
+Client-Version: 0
+Acs-Token: 
+Origin: https://shangjibao.baidu.com
+Sec-Fetch-Site: same-origin
+Sec-Fetch-Mode: cors
+Sec-Fetch-Dest: empty
+Referer: https://shangjibao.baidu.com/businessRecommand/dynamicRecommand?type=1&source=aqcicp&login_type=weixin
+Accept-Encoding: gzip, deflate, br
+Accept-Language: zh-CN,zh;q=0.9,en;q=0.8,en-GB;q=0.7,en-US;q=0.6
+Priority: u=1, i
+Connection: keep-alive
+
+{"param":{"unlockedRange":1,"page":{"currPage":1,"pageSize":50},"district":[],"recordTime":{"start":"2000-01-01","end":"2026-06-01"},"sort":[],"query":"山东大学","industry":[],"scopes":[1]}}
