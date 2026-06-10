@@ -529,7 +529,7 @@ def _is_valid_domain_value(domain):
 
 
 def filter_domains_programmatic(all_items, company_name, source=None):
-    """程序化过滤域名：天眼查使用关联匹配，其他来源默认严格匹配。"""
+    """程序化过滤域名：所有来源统一使用关联匹配（包含关系），保留主体本部及附属单位。"""
     if not all_items:
         return []
 
@@ -541,22 +541,15 @@ def filter_domains_programmatic(all_items, company_name, source=None):
             continue
         filtered_items.append(item)
 
-    # 天眼查：优先关联匹配（避免把附属单位全过滤掉）
-    if source == "tyc":
-        matched = [
-            item["domain"] for item in filtered_items
-            if _is_related_entity(item.get("entity", "").strip(), company_name)
-        ]
-        # 兜底：如果关联匹配过少，保留所有有效域名（仍已去掉占位词/IP/掩码）
-        if len(matched) <= max(1, len(filtered_items) // 10):
-            return [item["domain"] for item in filtered_items]
-        return matched
-
-    # 其他来源默认严格匹配
-    return [
+    # 统一使用关联匹配：entity 等于或包含目标主体名称
+    matched = [
         item["domain"] for item in filtered_items
-        if item.get("entity", "").strip() == company_name
+        if _is_related_entity(item.get("entity", "").strip(), company_name)
     ]
+    # 兜底：如果关联匹配过少（可能 entity 字段为空或不规范），保留所有有效域名
+    if len(matched) <= max(1, len(filtered_items) // 10):
+        return [item["domain"] for item in filtered_items]
+    return matched
 
 
 def analyze_entity_relationships(all_items, company_name):
@@ -778,10 +771,6 @@ def main():
             for item in icp_domains:
                 if not icp_num:
                     icp_num = item.get("icp", "")
-            if before_count != after_count:
-                _ok(f"过滤 {before_count - after_count} 个，保留 {after_count} 个")
-            else:
-                _ok(f"无需过滤")
 
             # -- Step 6: DNS 解析检查 --
             _step(f"DNS 解析检查 ({len(all_domains)} 个域名)")
