@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+*.egg
+.venv/
+venv/
+env/
+
+# 配置文件（包含 API 密钥和敏感信息）
+config.ini
+
+# HTTP 请求文件（包含 Cookie、Token 等敏感信息）
+shangjibao_request.txt
+tianyancha_request.txt
+
+# 输出结果目录
+*_output/
+*_output*/
+
+# 运行时产生的数据文件
+*.csv
+*.xlsx
+*.xls
+
+# 工具二进制文件
+dddd/dddd.exe
+dddd/nuclei.exe
+dddd/*.txt
+dddd/config/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# 日志
+*.log
