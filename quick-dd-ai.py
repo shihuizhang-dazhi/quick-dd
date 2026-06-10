@@ -529,7 +529,9 @@ def _is_valid_domain_value(domain):
 
 
 def filter_domains_programmatic(all_items, company_name, source=None):
-    """程序化过滤域名：所有来源统一使用关联匹配（包含关系），保留主体本部及附属单位。"""
+    """程序化过滤域名：精确匹配 entity == company_name。
+    仅当 source=='tyc'（天眼查）时使用关联匹配（天眼查返回的 entity 字段不带括号/后缀）。
+    """
     if not all_items:
         return []
 
@@ -541,15 +543,21 @@ def filter_domains_programmatic(all_items, company_name, source=None):
             continue
         filtered_items.append(item)
 
-    # 统一使用关联匹配：entity 等于或包含目标主体名称
-    matched = [
+    # 天眼查：关联匹配（天眼查 entity 不带括号内容，需宽松匹配附属单位）
+    if source == "tyc":
+        matched = [
+            item["domain"] for item in filtered_items
+            if _is_related_entity(item.get("entity", "").strip(), company_name)
+        ]
+        if len(matched) <= max(1, len(filtered_items) // 10):
+            return [item["domain"] for item in filtered_items]
+        return matched
+
+    # 其他来源（商机宝等）：严格精确匹配 entity == company_name
+    return [
         item["domain"] for item in filtered_items
-        if _is_related_entity(item.get("entity", "").strip(), company_name)
+        if item.get("entity", "").strip() == company_name
     ]
-    # 兜底：如果关联匹配过少（可能 entity 字段为空或不规范），保留所有有效域名
-    if len(matched) <= max(1, len(filtered_items) // 10):
-        return [item["domain"] for item in filtered_items]
-    return matched
 
 
 def analyze_entity_relationships(all_items, company_name):
