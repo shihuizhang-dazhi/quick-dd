@@ -337,7 +337,7 @@ def icp_query_by_name(company_name):
         cookie = tyc_client.load_tyc_cookie()
         if cookie:
             try:
-                tyc_items = tyc_client.tianyancha_search(company_name, cookie, max_pages=5, verbose=False)
+                tyc_items = tyc_client.tianyancha_search(company_name, cookie, max_pages=999, verbose=False)
                 if tyc_items:
                     parsed = []
                     for it in tyc_items:
