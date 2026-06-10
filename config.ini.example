@@ -30,3 +30,7 @@ cookie =
 user_info =
 acs_token =
 x_sourceid =
+
+# 天眼查配置（通过 tianyancha_request.txt 文件中的 Cookie 认证）
+# 推荐方式：将浏览器F12抓到的完整HTTP请求粘贴到 tianyancha_request.txt 文件中
+# 参考：https://beian.tianyancha.com 登录后 F12 抓包
