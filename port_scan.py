@@ -1,21 +1,23 @@
 #!/usr/bin/env python3
-"""从 urls.txt 读取域名，扫描常见端口（支持 TCP connect + SYN 半连接）
+"""端口扫描工具（asyncio 异步版）
 
-优化版本：
-- 两阶段扫描：先快速 TCP connect 判断端口开放，再对开放端口做服务识别
-- 自适应超时：高频端口 1.5s，低频端口 1s
-- Windows 自动跳过 SYN 扫描
-- 端口优先级：先扫 Top20，主机无响应则跳过剩余端口
-- 并发数提升至 100
+用法:
+    python port_scan.py urls.txt              # 扫描域名列表
+    python port_scan.py 211.64.160.0/24       # 扫描 CIDR 网段
+    python port_scan.py urls.txt --ports 80,443,22 --concurrency 5000
 """
+import asyncio
 import os
 import platform
+import re
 import socket
 import struct
 import sys
-import re
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import ipaddress
+from typing import Dict, List, Optional, Set, Tuple
+
+# ── 端口配置 ──
 
 TOP100_PORTS = [
     80, 23, 443, 21, 22, 25, 3389, 110, 445, 139, 143, 53, 135, 3306, 8080,
@@ -28,22 +30,202 @@ TOP100_PORTS = [
     8089, 8090, 9000, 9043, 9200, 9443, 10443, 11211, 27017,
 ]
 
-# 高频端口优先扫描（出现概率最高的 Top20）
-HIGH_FREQ_PORTS = [
-    80, 443, 8080, 8443, 8888, 22, 21, 3389, 3306, 1433,
-    5432, 6379, 8000, 8001, 9000, 9200, 27017, 25, 110, 445,
-]
-
-# 默认端口列表
 COMMON_PORTS = TOP100_PORTS
 
 # 超时配置
-FAST_TIMEOUT = 1.5   # 快速连接检测超时
-BANNER_TIMEOUT = 2   # Banner 抓取超时
-IS_WINDOWS = platform.system() == "Windows"
+CONNECT_TIMEOUT = 1.0    # TCP 连接超时
+BANNER_TIMEOUT = 1.5     # Banner 抓取超时
+
+# ── 服务识别 ──
+
+_HTTP_PORTS = {80, 81, 82, 83, 85, 88, 888, 8000, 8001, 8002, 8003, 8008,
+               8010, 8080, 8081, 8082, 8086, 8088, 8089, 8090, 8888,
+               9000, 9043, 9200, 10000}
+
+_TLS_PORTS = {443, 8443, 9443, 4430, 4433, 4443, 5443, 10443}
+
+_TLS_CLIENT_HELLO = (
+    b"\x16\x03\x01\x00\x2e\x01\x00\x00\x2a\x03\x03"
+    + b"\x00" * 31
+)
 
 
-def extract_hosts(urls_file):
+async def _async_connect(host: str, port: int, timeout: float = CONNECT_TIMEOUT) -> bool:
+    """异步 TCP connect 检测端口是否开放"""
+    try:
+        _, writer = await asyncio.wait_for(
+            asyncio.open_connection(host, port),
+            timeout=timeout
+        )
+        writer.close()
+        await writer.wait_closed()
+        return True
+    except (asyncio.TimeoutError, ConnectionRefusedError, OSError):
+        return False
+
+
+async def _identify_service(host: str, port: int) -> str:
+    """对已知开放端口做服务识别"""
+    try:
+        reader, writer = await asyncio.wait_for(
+            asyncio.open_connection(host, port),
+            timeout=BANNER_TIMEOUT
+        )
+    except Exception:
+        return ""
+
+    try:
+        # 等待服务主动发 banner（1s）
+        try:
+            data = await asyncio.wait_for(reader.read(1024), timeout=1.0)
+            if data:
+                banner = data.decode("utf-8", errors="ignore").strip()[:120]
+                # HTTP 响应检测
+                if b"HTTP/" in data or b"<html" in data.lower():
+                    return _parse_http_banner(data)
+                # TLS ServerHello
+                if data[:2] == b"\x16\x03":
+                    return "TLS"
+                return banner
+        except asyncio.TimeoutError:
+            pass
+
+        # 主动发探测
+        if port in _HTTP_PORTS:
+            writer.write(f"GET / HTTP/1.0\r\nHost: {host}\r\n\r\n".encode())
+            await writer.drain()
+            try:
+                data = await asyncio.wait_for(reader.read(4096), timeout=1.5)
+                if data and (b"HTTP/" in data or b"<html" in data.lower()):
+                    return _parse_http_banner(data)
+            except asyncio.TimeoutError:
+                pass
+
+        if port in _TLS_PORTS:
+            writer.write(_TLS_CLIENT_HELLO)
+            await writer.drain()
+            try:
+                data = await asyncio.wait_for(reader.read(1024), timeout=1.0)
+                if data and data[:2] == b"\x16\x03":
+                    return "TLS"
+            except asyncio.TimeoutError:
+                pass
+
+        # Redis PING
+        if port == 6379:
+            writer.write(b"PING\r\n")
+            await writer.drain()
+            try:
+                data = await asyncio.wait_for(reader.read(1024), timeout=1.0)
+                if data and data[:1] in (b"+", b"-"):
+                    return f"Redis: {data.decode('utf-8', errors='ignore').strip()[:60]}"
+            except asyncio.TimeoutError:
+                pass
+
+        # Memcached
+        if port == 11211:
+            writer.write(b"version\r\n")
+            await writer.drain()
+            try:
+                data = await asyncio.wait_for(reader.read(1024), timeout=1.0)
+                if data and b"VERSION" in data:
+                    return data.decode("utf-8", errors="ignore").strip()[:60]
+            except asyncio.TimeoutError:
+                pass
+
+    except Exception:
+        pass
+    finally:
+        try:
+            writer.close()
+            await writer.wait_closed()
+        except Exception:
+            pass
+
+    return ""
+
+
+def _parse_http_banner(data: bytes) -> str:
+    """从 HTTP 响应中提取状态码和 Server 头"""
+    text = data.decode("utf-8", errors="ignore")
+    parts = []
+    status_m = re.search(r'HTTP/[\d.]+ (\d+)', text)
+    if status_m:
+        parts.append(f"HTTP {status_m.group(1)}")
+    srv_m = re.search(r'[Ss]erver:\s*(.+?)[\r\n]', text)
+    if srv_m:
+        parts.append(srv_m.group(1).strip()[:60])
+    return " | ".join(parts) if parts else "HTTP"
+
+
+# ── 核心扫描逻辑 ──
+
+async def _scan_host_ports(host: str, ports: list, sem: asyncio.Semaphore,
+                           results: dict, progress: dict):
+    """扫描单个主机的多个端口"""
+    async with sem:
+        open_ports = []
+        # 先快速检测哪些端口开放
+        tasks = [_async_connect(host, port) for port in ports]
+        connect_results = await asyncio.gather(*tasks, return_exceptions=True)
+        for port, is_open in zip(ports, connect_results):
+            if isinstance(is_open, bool) and is_open:
+                open_ports.append(port)
+
+        # 对开放端口做服务识别
+        if open_ports:
+            services = {}
+            svc_tasks = [_identify_service(host, port) for port in open_ports]
+            svc_results = await asyncio.gather(*svc_tasks, return_exceptions=True)
+            for port, svc in zip(open_ports, svc_results):
+                if isinstance(svc, str) and svc:
+                    services[port] = svc
+            results[host] = {"ports": open_ports, "services": services}
+
+        progress["done"] += 1
+        if progress["done"] % 50 == 0 or progress["done"] == progress["total"]:
+            alive = len(results)
+            print(f"\r  进度: {progress['done']}/{progress['total']} | "
+                  f"有开放端口: {alive} 个主机", end="", flush=True)
+
+
+async def scan_hosts_async(hosts: list, ports: list = None,
+                           concurrency: int = 1000) -> dict:
+    """
+    异步扫描多个主机的端口
+
+    Args:
+        hosts: 主机列表（IP 或域名）
+        ports: 端口列表，默认 Top100
+        concurrency: 并发连接数（默认 1000）
+
+    Returns:
+        dict: {host: {"ports": [80, 443], "services": {80: "HTTP 200 | nginx"}}}
+    """
+    if ports is None:
+        ports = COMMON_PORTS
+
+    sem = asyncio.Semaphore(concurrency)
+    results = {}
+    progress = {"done": 0, "total": len(hosts)}
+
+    print(f"  目标: {len(hosts)} 主机 | {len(ports)} 端口 | 并发: {concurrency}")
+    print(f"  端口: {','.join(str(p) for p in ports[:15])}{'...' if len(ports) > 15 else ''}")
+
+    t_start = time.time()
+    tasks = [_scan_host_ports(host, ports, sem, results, progress) for host in hosts]
+    await asyncio.gather(*tasks)
+    elapsed = time.time() - t_start
+
+    print(f"\r{'':<60}", end="")
+    print(f"\r  扫描完成: {len(results)}/{len(hosts)} 主机有开放端口 | 耗时 {elapsed:.1f}s")
+    return results
+
+
+# ── 工具函数 ──
+
+def extract_hosts(urls_file: str) -> list:
+    """从 urls.txt 提取域名"""
     hosts = set()
     with open(urls_file) as f:
         for line in f:
@@ -53,421 +235,130 @@ def extract_hosts(urls_file):
     return sorted(hosts)
 
 
-# ── 阶段1: 快速 TCP Connect 检测端口是否开放 ──
-
-def tcp_connect_check(host, port, timeout=FAST_TIMEOUT):
-    """TCP connect 检测端口是否开放，带二次验证减少误报"""
+def expand_cidr(cidr_str: str, max_ips: int = 65536) -> list:
+    """展开 CIDR 网段为 IP 列表"""
     try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.settimeout(timeout)
-        result = s.connect_ex((host, port))
-        if result != 0:
-            s.close()
-            return False
-
-        # 二次验证：连接成功后尝试 recv，防火墙/负载均衡器可能会立即 RST
-        try:
-            s.settimeout(0.5)
-            s.recv(1)
-            # 收到数据说明确实有服务
-            s.close()
-            return True
-        except socket.timeout:
-            # 超时无数据，但连接未断 = 端口开放但服务不主动发 banner（正常）
-            s.close()
-            return True
-        except (ConnectionResetError, ConnectionAbortedError, OSError):
-            # 连接被重置 = 防火墙/负载均衡器假响应，误报
-            s.close()
-            return False
-    except Exception:
-        return False
-
-
-# ── 阶段2: 服务识别（仅对开放端口执行）──
-
-_HTTP_PORTS = {80, 443, 8000, 8001, 8002, 8003, 8008, 8010, 8080, 8081, 8082,
-               8086, 8088, 8089, 8090, 8443, 8888, 9000, 9043, 9200, 9443, 10443}
-
-_PROBE_BANNERS = {
-    22:   None,   # SSH 主动发 banner
-    21:   None,   # FTP 主动发 banner
-    25:   None,   # SMTP 主动发 banner
-    3306: b"\x00\x00\x01\x00",                        # MySQL
-    5432: b"\x00\x00\x00\x08\x04\xd2\x16/",          # PostgreSQL
-    6379: b"INFO\r\n",                                 # Redis
-    27017: b"\x3a\x00\x00\x00",                        # MongoDB
-    1433: b"\x12\x01\x00\x34\x00",                     # MSSQL
-    1521: b"\x00\x00\x00\x00",                         # Oracle
-    11211: b"version\r\n",                              # Memcached
-    9200: b"GET / HTTP/1.0\r\n\r\n",                    # Elasticsearch
-}
-
-
-def identify_service(host, port):
-    """对已知开放的端口做服务识别，返回 banner 信息字符串"""
-    try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.settimeout(BANNER_TIMEOUT)
-        s.connect((host, port))
-
-        # 尝试1: 等服务主动发 banner（SSH/FTP/SMTP 等）
-        try:
-            s.settimeout(2)
-            data = s.recv(1024)
-            if data:
-                banner = data.decode("utf-8", errors="ignore").strip()[:120]
-                s.close()
-                return banner
-        except socket.timeout:
-            pass
-
-        # 尝试2: HTTP 类端口发探测
-        if port in _HTTP_PORTS:
-            try:
-                s.sendall(b"GET / HTTP/1.0\r\nHost: " + host.encode() + b"\r\n\r\n")
-                data = s.recv(4096)
-                if b"HTTP" in data:
-                    # 提取 Server 头
-                    text = data.decode("utf-8", errors="ignore")
-                    srv_m = re.search(r'[Ss]erver:\s*(.+?)[\r\n]', text)
-                    status_m = re.search(r'HTTP/[\d.]+ (\d+)', text)
-                    parts = []
-                    if status_m:
-                        parts.append(f"HTTP {status_m.group(1)}")
-                    if srv_m:
-                        parts.append(srv_m.group(1).strip()[:60])
-                    s.close()
-                    return " | ".join(parts) if parts else "HTTP"
-            except Exception:
-                pass
-
-        # 尝试3: 数据库等协议握手
-        if port in _PROBE_BANNERS and _PROBE_BANNERS[port] is not None:
-            try:
-                s.sendall(_PROBE_BANNERS[port])
-                s.settimeout(2)
-                data = s.recv(1024)
-                if data:
-                    banner = data.decode("utf-8", errors="ignore").strip()[:120]
-                    s.close()
-                    return banner
-            except Exception:
-                pass
-
-        s.close()
-    except Exception:
-        pass
-    return ""
-
-
-# ── SYN 半连接扫描 ──
-
-def _checksum(data):
-    if len(data) % 2:
-        data += b"\x00"
-    s = 0
-    for i in range(0, len(data), 2):
-        s += (data[i] << 8) + data[i + 1]
-    s = (s >> 16) + (s & 0xFFFF)
-    s += s >> 16
-    return ~s & 0xFFFF
-
-
-def _build_syn_packet(src_ip, dst_ip, dst_port, sport):
-    """构造 IP + TCP SYN 包"""
-    tcp_len = 20
-    pseudo = struct.pack("!4s4sBBH",
-                         socket.inet_aton(src_ip),
-                         socket.inet_aton(dst_ip),
-                         0, socket.IPPROTO_TCP, tcp_len)
-
-    seq = 0
-    ack_seq = 0
-    offset_res = (5 << 4)
-    flags = 0x02  # SYN
-    window = 1024
-    urg_ptr = 0
-
-    tcp_header = struct.pack("!HHIIBBHHH",
-                             sport, dst_port, seq, ack_seq,
-                             offset_res, flags, window, 0, urg_ptr)
-
-    tcp_check = _checksum(pseudo + tcp_header)
-    tcp_header = struct.pack("!HHIIBBHHH",
-                             sport, dst_port, seq, ack_seq,
-                             offset_res, flags, window, tcp_check, urg_ptr)
-
-    version_ihl = 0x45
-    tos = 0
-    total_len = 20 + tcp_len
-    ident = sport
-    frag = 0
-    ttl = 64
-    proto = socket.IPPROTO_TCP
-    ip_check = 0
-
-    ip_header = struct.pack("!BBHHHBBH4s4s",
-                            version_ihl, tos, total_len, ident,
-                            frag, ttl, proto, ip_check,
-                            socket.inet_aton(src_ip),
-                            socket.inet_aton(dst_ip))
-
-    ip_check = _checksum(ip_header)
-    ip_header = struct.pack("!BBHHHBBH4s4s",
-                            version_ihl, tos, total_len, ident,
-                            frag, ttl, proto, ip_check,
-                            socket.inet_aton(src_ip),
-                            socket.inet_aton(dst_ip))
-
-    return ip_header + tcp_header
-
-
-def _get_local_ip(dst_ip):
-    try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.connect((dst_ip, 80))
-        ip = s.getsockname()[0]
-        s.close()
-        return ip
-    except Exception:
-        return "0.0.0.0"
-
-
-def syn_scan(host, ports):
-    """SYN 半连接扫描，需要 root 权限。返回开放端口列表。"""
-    try:
-        dst_ip = socket.gethostbyname(host)
-    except Exception:
+        network = ipaddress.ip_network(cidr_str, strict=False)
+        if network.num_addresses > max_ips:
+            print(f"  [!] 网段过大 ({network.num_addresses} 个 IP)，截取前 {max_ips} 个")
+            return [str(ip) for i, ip in enumerate(network.hosts()) if i < max_ips]
+        return [str(ip) for ip in network.hosts()]
+    except Exception as e:
+        print(f"  [!] CIDR 解析失败: {e}")
         return []
 
-    src_ip = _get_local_ip(dst_ip)
 
-    try:
-        send_sock = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_TCP)
-        recv_sock = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_TCP)
-        recv_sock.settimeout(FAST_TIMEOUT)
-    except PermissionError:
-        return None  # 无权限，返回 None 表示需要回退
-
-    open_ports = []
-
-    # 批量发送 SYN 包
-    for port in ports:
-        sport = 40000 + port
-        try:
-            packet = _build_syn_packet(src_ip, dst_ip, port, sport)
-            send_sock.sendto(packet, (dst_ip, 0))
-        except Exception:
-            pass
-
-    # 接收响应
-    send_sock.close()
-    deadline = time.time() + FAST_TIMEOUT + 1
-    sent_set = {40000 + p for p in ports}
-
-    try:
-        while time.time() < deadline:
-            remaining = deadline - time.time()
-            if remaining <= 0:
-                break
-            recv_sock.settimeout(remaining)
+def parse_ports(ports_str: str) -> list:
+    """解析端口列表，支持 80,443 或 1-1024 或混合"""
+    ports = []
+    for part in ports_str.split(","):
+        part = part.strip()
+        if "-" in part:
             try:
-                data, addr = recv_sock.recvfrom(65535)
-            except socket.timeout:
-                break
-
-            ip_hdr_len = (data[0] & 0x0F) * 4
-            if len(data) < ip_hdr_len + 20:
-                continue
-
-            tcp_header = data[ip_hdr_len:]
-            src_port, dst_port, seq, ack_seq, offset_res, flags = struct.unpack("!HHIIBB", tcp_header[:14])
-
-            if dst_port in sent_set and flags & 0x12 == 0x12:  # SYN+ACK
-                open_port = dst_port - 40000
-                open_ports.append(open_port)
-
-                # 发 RST 收尾
-                rst_pkt = _build_syn_packet(src_ip, dst_ip, open_port, dst_port)
-                rst_pkt = bytearray(rst_pkt)
-                rst_pkt[ip_hdr_len + 13] = 0x04  # RST flag
-                try:
-                    send_rst = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_TCP)
-                    send_rst.sendto(bytes(rst_pkt), (dst_ip, 0))
-                    send_rst.close()
-                except Exception:
-                    pass
-
-                sent_set.discard(dst_port)
-                if not sent_set:
-                    break
-    except Exception:
-        pass
-
-    recv_sock.close()
-    return sorted(open_ports)
+                start, end = part.split("-", 1)
+                start, end = int(start.strip()), int(end.strip())
+                if 1 <= start <= end <= 65535:
+                    ports.extend(range(start, end + 1))
+            except ValueError:
+                pass
+        else:
+            try:
+                p = int(part)
+                if 1 <= p <= 65535:
+                    ports.append(p)
+            except ValueError:
+                pass
+    return sorted(set(ports)) if ports else COMMON_PORTS
 
 
-# ── 两阶段扫描：快速检测 + 服务识别 ──
+def print_results(results: dict):
+    """格式化打印扫描结果"""
+    if not results:
+        print("  无开放端口")
+        return
 
-def _fast_tcp_scan(host, ports, max_workers=100):
-    """阶段1: 快速 TCP connect 检测开放端口"""
-    open_ports = []
-    with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        futures = {pool.submit(tcp_connect_check, host, p): p for p in ports}
-        for f in as_completed(futures):
-            if f.result():
-                open_ports.append(futures[f])
-    return sorted(open_ports)
-
-
-def _fast_tcp_scan_adaptive(host, ports):
-    """自适应扫描：先扫高频端口，如果主机无响应则跳过剩余端口"""
-    # 先扫高频端口
-    high_freq = [p for p in HIGH_FREQ_PORTS if p in ports]
-    high_open = _fast_tcp_scan(host, high_freq, max_workers=50)
-
-    # 如果高频端口全部不通，主机大概率不可达，跳过剩余端口
-    remaining = [p for p in ports if p not in high_freq]
-    if not high_open and remaining:
-        # 再用剩余端口中的前10个快速验证
-        probe_ports = remaining[:10]
-        probe_open = _fast_tcp_scan(host, probe_ports, max_workers=50)
-        if not probe_open:
-            # 主机确实无响应，跳过
-            return high_open
-        # 主机可达，继续扫描剩余端口
-        remaining_open = _fast_tcp_scan(host, [p for p in remaining if p not in probe_ports], max_workers=100)
-        return sorted(set(high_open) | set(probe_open) | set(remaining_open))
-
-    if remaining:
-        remaining_open = _fast_tcp_scan(host, remaining, max_workers=100)
-        return sorted(set(high_open) | set(remaining_open))
-
-    return high_open
+    for host in sorted(results):
+        info = results[host]
+        ports = info["ports"]
+        services = info.get("services", {})
+        svc_info = []
+        for p in ports:
+            s = services.get(p, "")
+            svc_info.append(f"{p}({s})" if s else str(p))
+        print(f"  {host}: {', '.join(svc_info)}")
 
 
-def _enrich_services(host, open_ports):
-    """阶段2: 对开放端口并行做服务识别"""
-    services = {}
-    with ThreadPoolExecutor(max_workers=min(len(open_ports), 20)) as pool:
-        futures = {pool.submit(identify_service, host, p): p for p in open_ports}
-        for f in as_completed(futures):
-            port = futures[f]
-            banner = f.result()
-            if banner:
-                services[port] = banner
-    return services
+def export_results(results: dict, output_file: str):
+    """导出结果到文件"""
+    with open(output_file, "w", encoding="utf-8") as f:
+        for host in sorted(results):
+            info = results[host]
+            ports = info["ports"]
+            services = info.get("services", {})
+            for p in ports:
+                svc = services.get(p, "")
+                f.write(f"{host}\t{p}\t{svc}\n")
+    print(f"  导出: {output_file}")
 
 
-# ── 扫描调度 ──
+# ── 兼容 quick-dd.py 调用的接口 ──
 
-def scan_host(host, mode="both", ports=None):
-    """
-    两阶段扫描:
-      阶段1 - 快速端口检测（TCP connect / SYN）
-      阶段2 - 服务识别（仅对开放端口）
-    
-    返回: (host, open_ports, services_dict)
-      services_dict: {port: banner_string}
-    """
+def scan_host(host, mode="tcp", ports=None):
+    """兼容 quick-dd.py 的旧接口，返回 (host, open_ports, services_dict)"""
     if ports is None:
         ports = COMMON_PORTS
 
-    if IS_WINDOWS and mode in ("syn", "both"):
-        # Windows 不支持原始套接字，自动回退 TCP
-        mode = "tcp"
+    async def _scan():
+        return await scan_hosts_async([host], ports, concurrency=len(ports))
 
-    open_ports = []
+    results = asyncio.run(_scan())
+    if host in results:
+        info = results[host]
+        return host, info["ports"], info["services"]
+    return host, [], {}
 
-    if mode == "syn":
-        result = syn_scan(host, ports)
-        if result is None:
-            print(f"  [!] {host}: SYN 需要 root 权限，回退 TCP connect")
-            open_ports = _fast_tcp_scan_adaptive(host, ports)
-        else:
-            open_ports = result
 
-    elif mode == "tcp":
-        open_ports = _fast_tcp_scan_adaptive(host, ports)
-
-    else:  # both
-        result = syn_scan(host, ports)
-        if result is None:
-            print(f"  [!] {host}: SYN 需要 root 权限，仅使用 TCP connect")
-            open_ports = _fast_tcp_scan_adaptive(host, ports)
-        else:
-            open_ports = result
-            # SYN 扫完再用 TCP connect 补漏
-            remaining = [p for p in ports if p not in result]
-            if remaining:
-                extra = _fast_tcp_scan(host, remaining)
-                open_ports = sorted(set(open_ports) | set(extra))
-
-    # 阶段2: 服务识别
-    services = {}
-    if open_ports:
-        services = _enrich_services(host, open_ports)
-
-    return host, open_ports, services
-
+# ── 主函数 ──
 
 def main():
-    mode = "both"
-    args = sys.argv[1:]
+    import argparse
+    parser = argparse.ArgumentParser(
+        description="端口扫描工具（asyncio 异步版）",
+        epilog="示例:\n"
+               "  python port_scan.py urls.txt\n"
+               "  python port_scan.py 211.64.160.0/24\n"
+               "  python port_scan.py 211.64.160.0/24 --ports 80,443,22\n"
+               "  python port_scan.py urls.txt --concurrency 5000",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument("target", help="urls.txt 文件 或 CIDR 网段（如 211.64.160.0/24）")
+    parser.add_argument("--ports", default="", help="端口列表（如 80,443 或 1-1024）")
+    parser.add_argument("--concurrency", type=int, default=1000, help="并发连接数（默认 1000）")
+    args = parser.parse_args()
 
-    if "--syn" in args:
-        mode = "syn"
-        args.remove("--syn")
-    elif "--tcp" in args:
-        mode = "tcp"
-        args.remove("--tcp")
-
-    if not args:
-        print(f"用法: python3 {sys.argv[0]} [--syn|--tcp] <urls.txt>")
-        print(f"  --syn  仅 SYN 半连接扫描（需要 root）")
-        print(f"  --tcp  仅 TCP connect 扫描")
-        print(f"  默认   SYN + TCP 双扫描")
-        sys.exit(1)
-
-    hosts = extract_hosts(args[0])
-    if IS_WINDOWS:
-        import ctypes
-        is_admin = ctypes.windll.shell32.IsUserAnAdmin() != 0
+    target = args.target
+    if "/" in target and not target.startswith("http"):
+        hosts = expand_cidr(target)
+        print(f"  CIDR: {target} → {len(hosts)} 个 IP")
     else:
-        is_admin = os.geteuid() == 0
+        hosts = extract_hosts(target)
+        print(f"  域名文件: {target} → {len(hosts)} 个主机")
 
-    scan_label = {"syn": "SYN", "tcp": "TCP connect", "both": "SYN + TCP connect"}[mode]
-    root_hint = " [admin]" if is_admin else ""
+    if not hosts:
+        print("  无扫描目标")
+        return
 
-    # Windows 自动切换
-    effective_mode = mode
-    if IS_WINDOWS and mode in ("syn", "both"):
-        effective_mode = "tcp"
-        if mode == "both":
-            scan_label = "TCP connect (Windows, 自动跳过SYN)"
+    ports = parse_ports(args.ports) if args.ports else COMMON_PORTS
 
-    print(f"共 {len(hosts)} 个主机 | {len(COMMON_PORTS)} 个端口 | {scan_label}{root_hint}\n")
+    results = asyncio.run(scan_hosts_async(hosts, ports, args.concurrency))
 
-    t_start = time.time()
-    results = {}
-    all_services = {}
-    with ThreadPoolExecutor(max_workers=20) as pool:
-        futures = {pool.submit(scan_host, h, mode): h for h in hosts}
-        for f in as_completed(futures):
-            host, open_ports, services = f.result()
-            if open_ports:
-                results[host] = open_ports
-                all_services[host] = services
-                svc_info = []
-                for p in open_ports:
-                    s = services.get(p, "")
-                    svc_info.append(f"{p}({s})" if s else str(p))
-                print(f"  {host}: {', '.join(svc_info)}")
+    print()
+    print_results(results)
 
-    elapsed = time.time() - t_start
-    print(f"\n共 {len(results)}/{len(hosts)} 个主机有开放端口 | 耗时 {elapsed:.1f}s")
+    # 导出
+    out_dir = os.getcwd()
+    out_file = os.path.join(out_dir, "port_scan_results.txt")
+    export_results(results, out_file)
 
 
 if __name__ == "__main__":

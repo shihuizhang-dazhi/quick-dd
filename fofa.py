@@ -133,7 +133,9 @@ def search(q: str, size: int = DEFAULT_SIZE) -> List[Dict]:
             if len(row) < 8:
                 continue
             host, ip, domain, port, protocol, title, country, city = row[:8]
-            dedup_key = f"{ip}:{port}"
+            # 去掉协议前缀用于去重（FOFA 返回的 host 有时带 https:// 有时不带）
+            host_clean = re.sub(r'^https?://', '', (host or '')).rstrip('/')
+            dedup_key = f"{host_clean}:{port}" if host_clean else f"{ip}:{port}"
             if dedup_key in seen:
                 continue
             seen.add(dedup_key)
@@ -177,11 +179,14 @@ def print_results(results: List[Dict]):
         print("  无结果")
         return
 
-    print(f"  {'IP':<18} {'端口':<7} {'协议':<8} {'标题'}")
-    print(f"  {'-'*17} {'-'*6} {'-'*7} {'-'*40}")
+    print(f"  {'域名':<45} {'IP':<18} {'端口':<7} {'协议':<8} {'标题'}")
+    print(f"  {'-'*44} {'-'*17} {'-'*6} {'-'*7} {'-'*40}")
     for r in results:
+        host = r["host"] if r["host"] else "-"
+        # 去掉协议前缀，只显示纯域名
+        host = re.sub(r'^https?://', '', host).rstrip('/')
         title = r["title"][:40] if r["title"] else "-"
-        print(f"  {r['ip']:<18} {r['port']:<7} {r['protocol']:<8} {title}")
+        print(f"  {host:<45} {r['ip']:<18} {r['port']:<7} {r['protocol']:<8} {title}")
 
 
 def export_txt(results: List[Dict], output_file: str):

@@ -175,6 +175,20 @@ def _preferred_url_for_host(host: str, url_candidates):
     return sorted(url_candidates)[0] if url_candidates else ""
 
 
+def _expand_cidr(cidr_str: str) -> list:
+    """将 CIDR 网段展开为 IP 列表，限制最多 65536 个 IP"""
+    import ipaddress
+    try:
+        network = ipaddress.ip_network(cidr_str, strict=False)
+        if network.num_addresses > 65536:
+            print(f"  [!] 网段过大 ({network.num_addresses} 个 IP)，限制为 /16 (65536)")
+            network = ipaddress.ip_network(f"{network.network_address}/16", strict=False)
+        return [str(ip) for ip in network.hosts()]
+    except Exception as e:
+        print(f"  [!] CIDR 解析失败: {e}")
+        return []
+
+
 def main():
     import argparse
     parser = argparse.ArgumentParser(
@@ -205,6 +219,7 @@ def main():
     parser.add_argument("domain", help="目标域名（如 example.com）")
     parser.add_argument("--fofa", action="store_true", help="启用 FOFA 资产查询")
     parser.add_argument("--port-scan", action="store_true", help="启用 TCP 端口扫描")
+    parser.add_argument("--cidr-scan", default="", metavar="CIDR", help="直接扫描 CIDR 网段（如 211.64.160.0/19）")
     parser.add_argument("--fofa-query", default="", metavar="QUERY", help="自定义 FOFA 查询语句（如 'title=\"登录\"'）")
     parser.add_argument("--fofa-size", type=int, default=100, metavar="N", help="FOFA 查询条数（默认 100）")
     parser.add_argument("--ports", default="", metavar="PORTS", help="自定义端口（如 1-1024 或 80,443,8080）")
@@ -214,6 +229,8 @@ def main():
     if args.fofa:
         USE_FOFA = True
     if args.port_scan:
+        USE_PORT_SCAN = True
+    if args.cidr_scan:
         USE_PORT_SCAN = True
 
     domain = args.domain.strip()
@@ -330,7 +347,7 @@ def main():
                 from fofa import search as fofa_search_custom
                 fofa_results = silent(fofa_search_custom, args.fofa_query, args.fofa_size)
             else:
-                fofa_results = silent(fofa_search_domain, base_domain)
+                fofa_results = silent(fofa_search_domain, base_domain, args.fofa_size)
             if fofa_results:
                 fofa_hosts = set()
                 for r in fofa_results:
@@ -367,21 +384,37 @@ def main():
     # ── 7. 端口扫描 ──
     port_scan_results = {}
     if USE_PORT_SCAN:
-        alive_host_set = sorted({row["host"] for row in all_rows if row.get("alive")})
         custom_ports = None
         if args.ports:
             custom_ports = _parse_ports(args.ports)
-        if alive_host_set:
-            _step(f"端口扫描 ({len(alive_host_set)} 主机)")
+
+        # 决定扫描目标列表
+        if args.cidr_scan:
+            # CIDR 模式：展开网段，跳过子域名探活，直接扫描 IP
+            _step(f"CIDR 展开 ({args.cidr_scan})")
+            cidr_ips = _expand_cidr(args.cidr_scan)
+            _ok(f"{len(cidr_ips)} 个 IP")
+            scan_targets = cidr_ips
+        else:
+            # 域名模式：只扫已探活的主机
+            scan_targets = sorted({row["host"] for row in all_rows if row.get("alive")})
+
+        if scan_targets:
+            _step(f"端口扫描 ({len(scan_targets)} 主机)")
             with ThreadPoolExecutor(max_workers=20) as pool:
-                futures = {pool.submit(port_scan_host, h, "tcp", custom_ports): h for h in alive_host_set}
+                futures = {pool.submit(port_scan_host, h, "tcp", custom_ports): h for h in scan_targets}
+                done_count = 0
                 for future in as_completed(futures):
+                    done_count += 1
+                    if done_count % 100 == 0:
+                        print(f"\r  扫描进度: {done_count}/{len(scan_targets)}", end="", flush=True)
                     try:
                         host, ports, *_ = future.result()
                         if ports:
                             port_scan_results[host] = ports
                     except Exception:
                         pass
+            print(f"\r{'':<50}", end="", flush=True)
             if port_scan_results:
                 total_ports = sum(len(p) for p in port_scan_results.values())
                 _ok(f"{len(port_scan_results)} 主机开放 / {total_ports} 端口")
