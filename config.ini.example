@@ -1,0 +1,36 @@
+[mimo]
+# 小米 MiMo AI 配置（用于联网搜索找域名）
+api_key = YOUR_API_KEY
+base_url = https://api.xiaomimimo.com/v1
+model = mimo-v2.5-pro
+
+[zhipu]
+# 智谱 AI 配置（用于过滤域名，便宜）
+api_key = YOUR_API_KEY
+base_url = https://open.bigmodel.cn/api/paas/v4
+model = glm-4-flash
+
+[fofa]
+# FOFA API
+# 使用 hacktwohub 镜像站，只需要 key，不需要 email
+api_base = https://fofa.hacktwohub.us/api/v1
+key = YOUR_FOFA_KEY
+
+[mxnzp]
+# mxnzp.com ICP 备案查询
+# https://www.mxnzp.com/api/beian/search
+app_id = YOUR_APP_ID
+app_secret = YOUR_APP_SECRET
+
+[shangjibao]
+# 百度商机宝配置（备用方案，优先使用 shangjibao_request.txt）
+# 推荐方式：将浏览器F12抓到的完整HTTP请求粘贴到 shangjibao_request.txt 文件中
+# 以下字段仅在 shangjibao_request.txt 不存在时使用
+cookie =
+user_info =
+acs_token =
+x_sourceid =
+
+# 天眼查配置（通过 tianyancha_request.txt 文件中的 Cookie 认证）
+# 推荐方式：将浏览器F12抓到的完整HTTP请求粘贴到 tianyancha_request.txt 文件中
+# 参考：https://beian.tianyancha.com 登录后 F12 抓包
